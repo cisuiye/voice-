@@ -1,9 +1,13 @@
 const express = require("express");
+const cors = require("cors");
 const { McpServer } = require("@modelcontextprotocol/sdk/server/mcp.js");
 const { SSEServerTransport } = require("@modelcontextprotocol/sdk/server/sse.js");
 const { z } = require("zod");
 
 const app = express();
+
+// 允许跨域，解决 Claude 网页端连接失败的问题
+app.use(cors());
 app.use(express.json());
 
 const ELEVENLABS_API_KEY = process.env.ELEVENLABS_API_KEY;
@@ -121,10 +125,8 @@ app.get("/status", (req, res) => {
   res.json({ status: "ok", bot: BOT_NAME });
 });
 
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
+// 监听 0.0.0.0 非常重要，这样 Railway 才能把外部流量转发进来
+const PORT = process.env.PORT || 8080;
+app.listen(PORT, '0.0.0.0', () => {
   console.log(`Voice MCP server running on port ${PORT}`);
 });
-
-
-  
