@@ -2,6 +2,7 @@
   "name": "voice-mcp",
   "version": "1.0.0",
   "description": "MCP server for ElevenLabs voice synthesis",
+  "type": "module",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
