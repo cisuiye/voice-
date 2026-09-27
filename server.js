@@ -1,50 +1,60 @@
-const express = require("express");
-const cors = require("cors");
-const fs = require("fs");
-const path = require("path");
-const crypto = require("crypto");
-const { McpServer } = require("@modelcontextprotocol/sdk/server/mcp.js");
-const { StreamableHTTPServerTransport } = require("@modelcontextprotocol/sdk/server/streamableHttp.js");
-const { registerAppResource, registerAppTool } = require("@modelcontextprotocol/ext-apps");
-const { z } = require("zod");
+import express from "express";
+import cors from "cors";
+import crypto from "crypto";
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
+import { registerAppResource, registerAppTool } from "@modelcontextprotocol/ext-apps";
+import { z } from "zod";
 
 const app = express();
 app.use(cors());
 app.use(express.json());
 
-// 静态文件服务，用于存储音频
-const audioDir = path.join(__dirname, "audio");
-if (!fs.existsSync(audioDir)) fs.mkdirSync(audioDir);
-app.use("/audio", express.static(audioDir));
-
 const ELEVENLABS_API_KEY = process.env.ELEVENLABS_API_KEY;
 const VOICE_ID = process.env.VOICE_ID;
 const BOT_NAME = process.env.BOT_NAME || "AI";
 
-// OAuth 占位
+// OAuth 占位路由
 app.get("/.well-known/oauth-authorization-server", (req, res) => {
   const base = `${req.protocol}://${req.get("host")}`;
-  res.json({ issuer: base, authorization_endpoint: `${base}/oauth/authorize`, token_endpoint: `${base}/oauth/token`, response_types_supported: ["code"], grant_types_supported: ["authorization_code"] });
+  res.json({
+    issuer: base,
+    authorization_endpoint: `${base}/oauth/authorize`,
+    token_endpoint: `${base}/oauth/token`,
+    response_types_supported: ["code"],
+    grant_types_supported: ["authorization_code"],
+  });
 });
 app.get("/oauth/authorize", (req, res) => {
-  res.redirect(`${req.query.redirect_uri}?code=voice-mcp-code&state=${req.query.state}`);
+  const { redirect_uri, state } = req.query;
+  res.redirect(`${redirect_uri}?code=voice-mcp-code&state=${state}`);
 });
 app.post("/oauth/token", (req, res) => {
   res.json({ access_token: "voice-mcp-token", token_type: "bearer", expires_in: 86400 });
 });
 
-// 生成语音
 async function synthesizeSpeech(text) {
-  const response = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${VOICE_ID}`, {
-    method: "POST",
-    headers: { "xi-api-key": ELEVENLABS_API_KEY, "Content-Type": "application/json" },
-    body: JSON.stringify({ text, model_id: "eleven_multilingual_v2", voice_settings: { stability: 0.5, similarity_boost: 0.75 } }),
-  });
+  const response = await fetch(
+    `https://api.elevenlabs.io/v1/text-to-speech/${VOICE_ID}`,
+    {
+      method: "POST",
+      headers: {
+        "xi-api-key": ELEVENLABS_API_KEY,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        text: text,
+        model_id: "eleven_multilingual_v2",
+        voice_settings: { stability: 0.5, similarity_boost: 0.75 },
+      }),
+    }
+  );
   if (!response.ok) throw new Error(`ElevenLabs API error: ${await response.text()}`);
-  return Buffer.from(await response.arrayBuffer()).toString("base64");
+  const arrayBuffer = await response.arrayBuffer();
+  return Buffer.from(arrayBuffer).toString("base64");
 }
 
-// 🎨 这是要在 Claude App 里直接渲染的播放器 UI（HTML/CSS/JS）
+// 🎨 完美复刻截图效果的内嵌播放器 UI（HTML/CSS/JS）
 const PLAYER_UI = `
 <!DOCTYPE html>
 <html>
@@ -52,14 +62,18 @@ const PLAYER_UI = `
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <style>
-  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; margin: 0; padding: 16px; background: #ffffff; color: #1a1a1a; display: flex; justify-content: center; }
-  .player-card { width: 100%; max-width: 380px; background: #f9f9f9; border: 1px solid #e0e0e0; border-radius: 16px; padding: 16px; box-shadow: 0 4px 12px rgba(0,0,0,0.05); display: flex; flex-direction: column; gap: 12px; }
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; margin: 0; padding: 12px; background: transparent; display: flex; justify-content: center; }
+  .player-card { width: 100%; max-width: 360px; background: #f7f7f7; border: 1px solid #e5e5e5; border-radius: 16px; padding: 16px; box-shadow: 0 4px 12px rgba(0,0,0,0.05); display: flex; flex-direction: column; gap: 12px; transition: background 0.3s; }
+  @media (prefers-color-scheme: dark) { .player-card { background: #1e1e1e; border-color: #333; } .time { color: #aaa; } .transcript { background: #2a2a2a; color: #ddd; border-color: #444; } }
   .player-main { display: flex; align-items: center; gap: 12px; }
-  .play-btn { width: 48px; height: 48px; border-radius: 50%; background: #000; color: #fff; border: none; cursor: pointer; display: flex; align-items: center; justify-content: center; font-size: 18px; transition: transform 0.2s; flex-shrink: 0; }
+  .play-btn { width: 48px; height: 48px; border-radius: 50%; background: #000; color: #fff; border: none; cursor: pointer; display: flex; align-items: center; justify-content: center; font-size: 20px; transition: transform 0.2s; flex-shrink: 0; }
+  @media (prefers-color-scheme: dark) { .play-btn { background: #fff; color: #000; } }
   .play-btn:active { transform: scale(0.95); }
   .waveform { flex-grow: 1; height: 24px; display: flex; align-items: center; gap: 3px; overflow: hidden; }
   .waveform span { width: 3px; background: #ccc; border-radius: 2px; animation: wave 1s ease-in-out infinite alternate; }
-  .waveform span:nth-child(odd) { height: 10px; animation-delay: 0.2s; }
+  .waveform span.playing { background: #000; }
+  @media (prefers-color-scheme: dark) { .waveform span.playing { background: #fff; } }
+  .waveform span:nth-child(odd) { height: 12px; animation-delay: 0.2s; }
   .waveform span:nth-child(even) { height: 20px; animation-delay: 0.4s; }
   @keyframes wave { 0% { transform: scaleY(0.5); } 100% { transform: scaleY(1.5); } }
   .time { font-size: 13px; color: #888; font-variant-numeric: tabular-nums; flex-shrink: 0; }
@@ -80,7 +94,6 @@ const PLAYER_UI = `
     <audio id="audioEl"></audio>
   </div>
 <script>
-  // 生成波形
   const wf = document.getElementById('waveform');
   for(let i=0; i<28; i++) { const span = document.createElement('span'); wf.appendChild(span); }
 
@@ -90,39 +103,43 @@ const PLAYER_UI = `
   const transcriptEl = document.getElementById('transcript');
   const toggleBtn = document.getElementById('toggleBtn');
 
-  // 从 Claude 传递的数据中获取音频和文字
+  // 监听 Claude 注入的 tool_result 数据
   window.addEventListener('message', (event) => {
     const data = event.data;
-    if (data.type === 'tool_result' || data.audioUrl) {
-        audio.src = data.audioUrl || data._meta?.audioUrl;
-        transcriptEl.textContent = data.text || '';
+    if (data && (data.type === 'tool_result' || data._meta)) {
+      const meta = data._meta || data;
+      if (meta.audioBase64) {
+        audio.src = "data:audio/mp3;base64," + meta.audioBase64;
+      }
+      if (meta.text) {
+        transcriptEl.textContent = meta.text;
+      }
     }
   });
 
-  // 也可以尝试自动获取 (视 ext-apps 版本而定)
-  setTimeout(() => {
-     // 如果 Claude 注入了数据，这里可以处理
-  }, 100);
-
   playBtn.addEventListener('click', () => {
-    if (audio.paused) { audio.play(); playBtn.textContent = '⏸'; } 
-    else { audio.pause(); playBtn.textContent = '▶'; }
+    if (audio.paused) { 
+      audio.play(); 
+      playBtn.textContent = '⏸'; 
+      wf.querySelectorAll('span').forEach(s => s.classList.add('playing'));
+    } 
+    else { 
+      audio.pause(); 
+      playBtn.textContent = '▶'; 
+      wf.querySelectorAll('span').forEach(s => s.classList.remove('playing'));
+    }
   });
 
   audio.addEventListener('timeupdate', () => {
     const mins = Math.floor(audio.currentTime / 60);
     const secs = Math.floor(audio.currentTime % 60);
     timeEl.textContent = mins + ':' + (secs < 10 ? '0' : '') + secs;
-    const progress = audio.currentTime / audio.duration;
-    // 简单控制波形高亮
-    const bars = wf.querySelectorAll('span');
-    bars.forEach((bar, i) => {
-       if (i / bars.length <= progress) bar.style.background = '#000';
-       else bar.style.background = '#ccc';
-    });
   });
 
-  audio.addEventListener('ended', () => { playBtn.textContent = '▶'; });
+  audio.addEventListener('ended', () => { 
+    playBtn.textContent = '▶'; 
+    wf.querySelectorAll('span').forEach(s => s.classList.remove('playing'));
+  });
 
   toggleBtn.addEventListener('click', () => {
     if (transcriptEl.style.display === 'block') {
@@ -136,12 +153,11 @@ const PLAYER_UI = `
 </html>
 `;
 
-// MCP 服务
 app.post("/mcp", async (req, res) => {
   try {
     const server = new McpServer({ name: "voice-mcp", version: "1.0.0" });
 
-    // 1. 注册界面资源
+    // 1. 注册 UI 资源
     registerAppResource(
       server,
       "Voice Player",
@@ -152,7 +168,7 @@ app.post("/mcp", async (req, res) => {
       })
     );
 
-    // 2. 注册工具，并绑定界面
+    // 2. 注册工具并绑定 UI
     registerAppTool(
       server,
       "speak",
@@ -161,16 +177,13 @@ app.post("/mcp", async (req, res) => {
       async ({ text }) => {
         try {
           const base64Audio = await synthesizeSpeech(text);
-          const fileName = `${crypto.randomUUID()}.mp3`;
-          fs.writeFileSync(path.join(audioDir, fileName), Buffer.from(base64Audio, "base64"));
-          const audioUrl = `${req.protocol}://${req.get("host")}/audio/${fileName}`;
 
-          // 注意：_meta 里包含音频 url 和原始文字，供上面的 HTML 使用
           return {
-            content: [{ type: "text", text: `语音已生成：${text}` }],
+            content: [{ type: "text", text: `🔊 语音已生成：${text}` }],
+            // 核心：将音频数据和文字通过 _meta 传递给 UI 渲染组件
             _meta: {
               ui: { resourceUri: "ui://voice/player.html" },
-              audioUrl: audioUrl,
+              audioBase64: base64Audio,
               text: text
             },
           };
@@ -185,6 +198,7 @@ app.post("/mcp", async (req, res) => {
     await server.connect(transport);
     await transport.handleRequest(req, res, req.body);
   } catch (error) {
+    console.error(error);
     if (!res.headersSent) res.status(500).json({ error: "Internal Server Error" });
   }
 });
