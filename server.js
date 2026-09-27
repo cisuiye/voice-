@@ -10,6 +10,32 @@ const ELEVENLABS_API_KEY = process.env.ELEVENLABS_API_KEY;
 const VOICE_ID = process.env.VOICE_ID;
 const BOT_NAME = process.env.BOT_NAME || "AI";
 
+// OAuth endpoints required by Claude.ai
+app.get("/.well-known/oauth-authorization-server", (req, res) => {
+  const base = `${req.protocol}://${req.get("host")}`;
+  res.json({
+    issuer: base,
+    authorization_endpoint: `${base}/oauth/authorize`,
+    token_endpoint: `${base}/oauth/token`,
+    response_types_supported: ["code"],
+    grant_types_supported: ["authorization_code"],
+  });
+});
+
+app.get("/oauth/authorize", (req, res) => {
+  const { redirect_uri, state } = req.query;
+  const code = "voice-mcp-code";
+  res.redirect(`${redirect_uri}?code=${code}&state=${state}`);
+});
+
+app.post("/oauth/token", (req, res) => {
+  res.json({
+    access_token: "voice-mcp-token",
+    token_type: "bearer",
+    expires_in: 86400,
+  });
+});
+
 async function synthesizeSpeech(text) {
   const response = await fetch(
     `https://api.elevenlabs.io/v1/text-to-speech/${VOICE_ID}`,
@@ -40,14 +66,11 @@ async function synthesizeSpeech(text) {
   return base64Audio;
 }
 
-function buildAudioPlayerHtml(base64Audio, text, botName) {
-  return `<audio-player>
-<audio src="data:audio/mpeg;base64,${base64Audio}" controls style="width:100%;border-radius:12px;"></audio>
-<details style="margin-top:8px;font-size:13px;color:#888;">
-<summary>查看文本</summary>
-<p style="margin:6px 0 0 0;">${text}</p>
-</details>
-</audio-player>`;
+function buildAudioPlayerHtml(base64Audio, text) {
+  return `<audio controls style="width:100%;border-radius:12px;">
+<source src="data:audio/mpeg;base64,${base64Audio}" type="audio/mpeg">
+</audio>
+<p style="font-size:13px;color:#888;margin-top:6px;">${text}</p>`;
 }
 
 const transports = {};
@@ -65,7 +88,7 @@ app.get("/mcp", async (req, res) => {
     async ({ text }) => {
       try {
         const base64Audio = await synthesizeSpeech(text);
-        const html = buildAudioPlayerHtml(base64Audio, text, BOT_NAME);
+        const html = buildAudioPlayerHtml(base64Audio, text);
         return {
           content: [{ type: "text", text: html }],
         };
@@ -102,3 +125,6 @@ const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`Voice MCP server running on port ${PORT}`);
 });
+
+
+  
