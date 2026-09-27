@@ -1,12 +1,10 @@
 const express = require("express");
 const cors = require("cors");
 const { McpServer } = require("@modelcontextprotocol/sdk/server/mcp.js");
-const { SSEServerTransport } = require("@modelcontextprotocol/sdk/server/sse.js");
+const { StreamableHTTPServerTransport } = require("@modelcontextprotocol/sdk/server/streamableHttp.js");
 const { z } = require("zod");
 
 const app = express();
-
-// 允许跨域，解决 Claude 网页端连接失败的问题
 app.use(cors());
 app.use(express.json());
 
@@ -14,7 +12,7 @@ const ELEVENLABS_API_KEY = process.env.ELEVENLABS_API_KEY;
 const VOICE_ID = process.env.VOICE_ID;
 const BOT_NAME = process.env.BOT_NAME || "AI";
 
-// OAuth endpoints required by Claude.ai
+// OAuth 占位路由 (保留)
 app.get("/.well-known/oauth-authorization-server", (req, res) => {
   const base = `${req.protocol}://${req.get("host")}`;
   res.json({
@@ -25,21 +23,15 @@ app.get("/.well-known/oauth-authorization-server", (req, res) => {
     grant_types_supported: ["authorization_code"],
   });
 });
-
 app.get("/oauth/authorize", (req, res) => {
   const { redirect_uri, state } = req.query;
-  const code = "voice-mcp-code";
-  res.redirect(`${redirect_uri}?code=${code}&state=${state}`);
+  res.redirect(`${redirect_uri}?code=voice-mcp-code&state=${state}`);
 });
-
 app.post("/oauth/token", (req, res) => {
-  res.json({
-    access_token: "voice-mcp-token",
-    token_type: "bearer",
-    expires_in: 86400,
-  });
+  res.json({ access_token: "voice-mcp-token", token_type: "bearer", expires_in: 86400 });
 });
 
+// 调用 ElevenLabs API
 async function synthesizeSpeech(text) {
   const response = await fetch(
     `https://api.elevenlabs.io/v1/text-to-speech/${VOICE_ID}`,
@@ -52,22 +44,13 @@ async function synthesizeSpeech(text) {
       body: JSON.stringify({
         text: text,
         model_id: "eleven_multilingual_v2",
-        voice_settings: {
-          stability: 0.5,
-          similarity_boost: 0.75,
-        },
+        voice_settings: { stability: 0.5, similarity_boost: 0.75 },
       }),
     }
   );
-
-  if (!response.ok) {
-    const err = await response.text();
-    throw new Error(`ElevenLabs API error: ${err}`);
-  }
-
+  if (!response.ok) throw new Error(`ElevenLabs API error: ${await response.text()}`);
   const arrayBuffer = await response.arrayBuffer();
-  const base64Audio = Buffer.from(arrayBuffer).toString("base64");
-  return base64Audio;
+  return Buffer.from(arrayBuffer).toString("base64");
 }
 
 function buildAudioPlayerHtml(base64Audio, text) {
@@ -77,56 +60,37 @@ function buildAudioPlayerHtml(base64Audio, text) {
 <p style="font-size:13px;color:#888;margin-top:6px;">${text}</p>`;
 }
 
-const transports = {};
-
-app.get("/mcp", async (req, res) => {
-  const server = new McpServer({
-    name: "voice-mcp",
-    version: "1.0.0",
-  });
-
-  server.tool(
-    "speak",
-    "将文字转换为语音并播放",
-    { text: z.string().describe("要朗读的文字") },
-    async ({ text }) => {
-      try {
-        const base64Audio = await synthesizeSpeech(text);
-        const html = buildAudioPlayerHtml(base64Audio, text);
-        return {
-          content: [{ type: "text", text: html }],
-        };
-      } catch (err) {
-        return {
-          content: [{ type: "text", text: `语音合成失败: ${err.message}` }],
-          isError: true,
-        };
-      }
-    }
-  );
-
-  const transport = new SSEServerTransport("/mcp", res);
-  transports[transport.sessionId] = transport;
-  res.on("close", () => delete transports[transport.sessionId]);
-  await server.connect(transport);
-});
-
+// 全新的 Streamable HTTP 模式，解决“没有工具”的致命问题
 app.post("/mcp", async (req, res) => {
-  const sessionId = req.query.sessionId;
-  const transport = transports[sessionId];
-  if (!transport) {
-    res.status(404).json({ error: "Session not found" });
-    return;
+  try {
+    const server = new McpServer({ name: "voice-mcp", version: "1.0.0" });
+    
+    server.tool(
+      "speak",
+      "将文字转换为语音并播放",
+      { text: z.string().describe("要朗读的文字") },
+      async ({ text }) => {
+        try {
+          const base64Audio = await synthesizeSpeech(text);
+          const html = buildAudioPlayerHtml(base64Audio, text);
+          return { content: [{ type: "text", text: html }] };
+        } catch (err) {
+          return { content: [{ type: "text", text: `语音合成失败: ${err.message}` }], isError: true };
+        }
+      }
+    );
+
+    const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
+    res.on("close", () => { transport.close(); server.close(); });
+    await server.connect(transport);
+    await transport.handleRequest(req, res, req.body);
+  } catch (error) {
+    if (!res.headersSent) res.status(500).json({ error: "Internal Server Error" });
   }
-  await transport.handlePostMessage(req, res, req.body);
 });
 
-app.get("/status", (req, res) => {
-  res.json({ status: "ok", bot: BOT_NAME });
-});
+app.get("/mcp", (req, res) => res.status(405).json({ error: "Method Not Allowed" }));
+app.get("/status", (req, res) => res.json({ status: "ok", bot: BOT_NAME }));
 
-// 监听 0.0.0.0 非常重要，这样 Railway 才能把外部流量转发进来
 const PORT = process.env.PORT || 8080;
-app.listen(PORT, '0.0.0.0', () => {
-  console.log(`Voice MCP server running on port ${PORT}`);
-});
+app.listen(PORT, '0.0.0.0', () => console.log(`Server running on port ${PORT}`));
